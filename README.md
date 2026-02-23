@@ -46,15 +46,15 @@ Threshold was optimized using F1-score from the Precision-Recall curve.
 ```mermaid
 flowchart TD
 
-    A[Client<br/>Swagger / HTTP Request] --> B[FastAPI Inference Service]
+    A[Client - Swagger / HTTP Request] --> B[FastAPI Inference Service]
 
-    B --> C1[XGBoost Model<br/>(fraud_xgboost.pkl)]
-    B --> C2[SHAP Explainer<br/>(TreeExplainer)]
-    B --> C3[Drift Monitor<br/>(Z-Score Check)]
+    B --> C1[XGBoost Model (fraud_xgboost.pkl)]
+    B --> C2[SHAP Explainer (TreeExplainer)]
+    B --> C3[Drift Monitor (Z-Score Check)]
 
-    C1 --> D[MLflow Tracking<br/>(Experiment Logging)]
+    C1 --> D[MLflow Tracking (Experiment Logging)]
 
-    subgraph Docker_Environment
+    subgraph Docker Environment
         B
         C1
         C2
@@ -62,9 +62,6 @@ flowchart TD
         D
     end
 ```
-
----
-
 ## ⚙️ API Endpoints
 
 | Endpoint | Description |
