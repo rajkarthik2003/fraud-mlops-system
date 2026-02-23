@@ -1,192 +1,169 @@
-# 🛡️ Fraud Detection System with MLOps Tracking
+# 🚀 Fraud Detection MLOps System
 
-A production-style fraud detection pipeline built with structured experimentation, reproducible training, and MLflow experiment tracking.
+An end-to-end production-style fraud detection system built with:
 
-This project demonstrates how to move from a simple ML baseline to a system designed with engineering rigor and MLOps foundations.
+- FastAPI
+- XGBoost
+- SHAP Explainability
+- MLflow Experiment Tracking
+- Drift Detection
+- Docker (Multi-container setup)
 
----
-
-## 🚀 Project Overview
-
-This system detects fraudulent credit card transactions using a Logistic Regression baseline wrapped inside a proper preprocessing pipeline and tracked with MLflow.
-
-Unlike notebook-only projects, this implementation focuses on:
-
-- Clean training pipeline
-- Feature scaling
-- Imbalanced classification evaluation
-- Experiment tracking
-- Reproducibility
-- Production-aware metric interpretation
+This project focuses not just on model accuracy, but on **operationalizing machine learning systems**.
 
 ---
 
-## 📂 Project Structure
+## 🎯 Problem Context
 
+The dataset contains only **0.17% fraud cases**, making it highly imbalanced.
+
+Instead of optimizing only ROC-AUC (~0.97), this system focuses on:
+
+- Threshold tuning
+- Precision vs Recall tradeoffs
+- False positive reduction
+- Explainability
+- Monitoring
+
+---
+
+## 📊 Model Performance
+
+| Metric        | Value |
+|---------------|--------|
+| ROC-AUC       | ~0.968 |
+| Best Threshold| 0.9238 |
+| Precision     | ~94%   |
+| Recall        | ~82%   |
+| False Positives | 5    |
+
+Threshold was optimized using F1-score from the Precision-Recall curve.
+
+---
+
+## 🏗️ System Architecture
+
+```mermaid
+flowchart TD
+
+    A[Client<br/>Swagger / HTTP Request] --> B[FastAPI Inference Service]
+
+    B --> C1[XGBoost Model<br/>(fraud_xgboost.pkl)]
+    B --> C2[SHAP Explainer<br/>(TreeExplainer)]
+    B --> C3[Drift Monitor<br/>(Z-Score Check)]
+
+    C1 --> D[MLflow Tracking<br/>(Experiment Logging)]
+
+    subgraph Docker_Environment
+        B
+        C1
+        C2
+        C3
+        D
+    end
+```
+
+---
+
+## ⚙️ API Endpoints
+
+| Endpoint | Description |
+|-----------|-------------|
+| `/predict` | Predict fraud probability |
+| `/predict_batch` | Batch prediction |
+| `/explain` | SHAP explainability |
+| `/metrics` | Model performance metrics |
+| `/drift_check` | Feature distribution drift detection |
+
+Swagger Docs:
+```
+http://localhost:8000/docs
+```
+
+---
+
+## 🧠 Key Engineering Decisions
+
+### 1️⃣ Imbalanced Learning
+Used `scale_pos_weight` in XGBoost to handle extreme class imbalance.
+
+### 2️⃣ Threshold Optimization
+Instead of default 0.5, optimized threshold to 0.9238 for better precision-recall tradeoff.
+
+### 3️⃣ Explainability
+Integrated SHAP TreeExplainer for feature-level contribution analysis.
+
+### 4️⃣ Drift Detection
+Implemented feature drift detection using Z-score comparison against training distribution.
+
+### 5️⃣ Experiment Tracking
+Tracked model training and metrics using MLflow.
+
+### 6️⃣ Containerization
+Dockerized API and UI using Docker Compose for reproducible deployment.
+
+---
+
+## 🐳 Running with Docker
+
+```bash
+docker compose up --build
+```
+
+API will be available at:
+
+```
+http://localhost:8000
+```
+
+---
+
+## 📁 Project Structure
+
+```
 fraud-mlops-system/
-
 │
-├── data/
-│   └── creditcard.csv
+├── app/
+│   ├── api/           # FastAPI service
+│   └── ui/            # Streamlit dashboard (WIP)
 │
-├── notebooks/
-│   └── 01_eda.ipynb
-│
-├── training/
-│   └── train_baseline.py
-│
-├── mlruns/
-├── models/
-└── README.md
+├── training/          # Model training scripts
+├── monitoring/        # Drift detection logic
+├── models/            # Saved model artifacts
+├── docker-compose.yml
+└── Dockerfile
+```
 
 ---
 
-## 🧠 Problem Context
+## 🚀 Future Improvements
 
-Fraud detection is an extremely imbalanced classification problem:
-
-- Legitimate transactions: ~99.8%
-- Fraud transactions: ~0.2%
-
-Accuracy alone is misleading.
-
-This project evaluates using:
-
-- ROC-AUC
-- PR-AUC
-- Precision / Recall
-- Minority class performance
+- Prometheus monitoring
+- Logging middleware
+- CI/CD pipeline (GitHub Actions)
+- Cloud deployment (AWS / Render)
+- Model versioning strategy
+- Real-time streaming integration
 
 ---
 
-## ⚙️ Baseline Model
+## 📌 Why This Project Matters
 
-Model:
-- Logistic Regression
-- StandardScaler (feature normalization)
-- Class balancing enabled
-- Implemented using Scikit-learn Pipeline
+Most ML projects stop at model training.
 
-Why Logistic Regression?
+This project focuses on:
 
-- Strong tabular baseline
-- Interpretable coefficients
-- Fast training
-- Stable optimization
-- Reliable calibration
+- Deployment
+- Monitoring
+- Explainability
+- Threshold optimization
+- System design
+
+It demonstrates production-minded machine learning engineering.
 
 ---
 
-## 📊 Final Reproducible Baseline Results (MLflow Tracked)
+## 👤 Author
 
-ROC-AUC: 0.9720  
-PR-AUC: 0.7189  
-Recall (Fraud): 0.92  
-Precision (Fraud): 0.06  
-Accuracy: 0.98  
-
-Classification Report:
-
-precision    recall  f1-score   support
-
-0       1.00      0.98      0.99     56864  
-1       0.06      0.92      0.11        98  
-
----
-
-## 🔍 Interpretation
-
-- The model detects 92% of fraud cases.
-- Precision is low due to extreme imbalance.
-- PR-AUC is prioritized over accuracy.
-- The baseline intentionally favors recall over precision.
-
-This mirrors real-world fraud systems where missing fraud is more costly than false alarms.
-
----
-
-## 📈 Experiment Tracking (MLflow)
-
-All experiments are tracked using MLflow:
-
-- Parameters
-- Metrics
-- Model artifacts
-- Reproducible runs
-
-Start MLflow UI:
-
-python -m mlflow ui
-
-Open:
-
-http://127.0.0.1:5000
-
-Experiment name:
-
-fraud_baseline_logreg
-
----
-
-## 🔄 Reproducibility
-
-To reproduce the experiment:
-
-python -m venv venv  
-venv\Scripts\activate  
-pip install -r requirements.txt  
-python training/train_baseline.py  
-
-Then:
-
-python -m mlflow ui  
-
----
-
-## 🧱 MLOps Foundations Implemented
-
-- Script-based training (not notebook-only)
-- Clean project structure
-- Experiment tracking
-- Metric logging
-- Model artifact logging
-- Local MLflow tracking backend
-- Reproducible pipeline
-
----
-
-## 📌 Design Tradeoff
-
-This baseline intentionally prioritizes recall over precision, accepting more false positives in order to minimize missed fraud.
-
-Threshold tuning is the next step for business-level optimization.
-
----
-
-## 🔮 Planned Extensions
-
-- Decision threshold optimization
-- Model comparison (XGBoost / LightGBM)
-- Model registry usage
-- CI/CD integration
-- Docker deployment
-- Real-time inference API
-- Monitoring & drift detection
-
----
-
-## 🛠 Tech Stack
-
-- Python
-- Scikit-learn
-- MLflow
-- Pandas
-- NumPy
-- Matplotlib
-- SQLite (MLflow backend)
-
----
-
-## 🎯 Key Takeaway
-
-This project demonstrates how to turn a baseline ML model into a structured, trackable, reproducible ML system with MLOps foundations.
+Raj Karthik  
+ML / Data / AI Enthusiast 
