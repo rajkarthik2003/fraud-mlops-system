@@ -1,0 +1,115 @@
+# filepath: .github/workflows/ci.yml
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      
+      - name: Cache pip packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+      
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install pytest pytest-cov httpx
+      
+      - name: Run linting
+        run: |
+          pip install flake8 black
+          flake8 app --count --select=E9,F63,F7,F82 --show-source --statistics || true
+          black --check app || true
+      
+      - name: Run tests
+        run: |
+          pytest tests/ -v --cov=app --cov-report=xml --cov-report=term
+      
+      - name: Upload coverage
+        if: github.event_name == 'pull_request'
+        uses: codecov/codecov-action@v4
+        with:
+          file: ./coverage.xml
+          flags: unittests
+          name: fraud-mlops
+
+  docker-build:
+    runs-on: ubuntu-latest
+    needs: test
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      
+      - name: Build Docker image
+        run: |
+          docker build -t fraud-mlops:${{ github.sha }} .
+      
+      - name: Run container health check
+        run: |
+          docker run -d --name test-container -p 8000:8000 fraud-mlops:${{ github.sha }}
+          sleep 5
+          docker logs test-container
+          docker stop test-container
+        continue-on-error: true
+
+  model-training:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push'
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      
+      - name: Install dependencies
+        run: pip install -r requirements.txt pandas
+      
+      - name: Download dataset
+        run: |
+          if [ ! -f data/creditcard.csv ]; then
+            mkdir -p data
+            # Note: In production, use Kaggle API or secure data source
+            echo "Dataset not included in repo - add via Kaggle API or secure storage"
+          fi
+      
+      - name: Train model
+        run: |
+          if [ -f data/creditcard.csv ]; then
+            python training/export_best_model.py
+          else
+            echo "Skipping training - dataset not available"
+          fi
+      
+      - name: Upload model artifacts
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: model-artifacts
+          path: models/
+          retention-days: 30

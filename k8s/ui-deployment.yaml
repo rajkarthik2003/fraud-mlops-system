@@ -1,0 +1,49 @@
+# filepath: k8s/ui-deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fraud-ui
+  namespace: fraud-detection
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: fraud-ui
+  template:
+    metadata:
+      labels:
+        app: fraud-ui
+    spec:
+      containers:
+        - name: ui
+          image: fraud-mlops:latest
+          ports:
+            - containerPort: 8501
+          env:
+            - name: API_URL
+              value: "http://fraud-api"
+            - name: API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: fraud-api-secret
+                  key: API_KEY
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "100m"
+            limits:
+              memory: "512Mi"
+              cpu: "250m"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: fraud-ui
+  namespace: fraud-detection
+spec:
+  selector:
+    app: fraud-ui
+  ports:
+    - port: 80
+      targetPort: 8501
+  type: LoadBalancer

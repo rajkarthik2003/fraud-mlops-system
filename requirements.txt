@@ -8,3 +8,10 @@ mlflow
 shap
 joblib
 streamlit
+# Testing
+pytest
+pytest-cov
+httpx
+# Linting
+flake8
+black

@@ -1,6 +1,29 @@
 version: "3.9"
 
 services:
+  # MLflow Tracking Server
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:latest
+    container_name: fraud_mlflow
+    ports:
+      - "5001:5000"
+    volumes:
+      - mlruns:/mlflow/artifacts
+    environment:
+      - MLFLOW_BACKEND_STORE=sqlite:///mlflow.db
+      - MLFLOW_ARTIFACT_ROOT=/mlflow/artifacts
+    command: >
+      mlflow server 
+      --backend-store-uri sqlite:///mlflow.db 
+      --default-artifact-root /mlflow/artifacts 
+      --host 0.0.0.0
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # FastAPI Inference Service
   api:
     build: .
     container_name: fraud_api
@@ -8,8 +31,23 @@ services:
       - "8000:8000"
     volumes:
       - ./models:/app/models
-    command: uvicorn app.api.main:app --host 0.0.0.0 --port 8000
+    environment:
+      - API_KEY=${API_KEY:-dev-key-change-in-production}
+      - MLFLOW_TRACKING_URI=http://mlflow:5000
+      - DATABASE_URL=postgresql://fraud_user:fraud_pass@postgres:5432/fraud_db
+    depends_on:
+      mlflow:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    command: uvicorn app.api.main:app --host 0.0.0.0 --port 8000 --workers 4
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
 
+  # Streamlit Dashboard
   ui:
     build: .
     container_name: fraud_ui
@@ -17,4 +55,38 @@ services:
       - "8501:8501"
     depends_on:
       - api
+    environment:
+      - API_URL=http://api:8000
+      - API_KEY=${API_KEY:-dev-key-change-in-production}
     command: streamlit run app/ui/dashboard.py --server.port=8501 --server.address=0.0.0.0
+
+  # PostgreSQL for prediction logging
+  postgres:
+    image: postgres:15-alpine
+    container_name: fraud_postgres
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_USER=fraud_user
+      - POSTGRES_PASSWORD=fraud_pass
+      - POSTGRES_DB=fraud_db
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  # Prometheus for metrics
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: fraud_prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+
+volumes:
+  mlruns:
+  postgres_data:
+  prometheus_data:
