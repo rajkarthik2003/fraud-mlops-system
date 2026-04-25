@@ -73,7 +73,7 @@ class TestSHAPExplanation:
         """Test selecting top 5 contributing features"""
         contributions = np.array([0.1, -0.5, 0.3, -0.8, 0.2, 0.4, -0.1, 0.0, 0.5, -0.3])
         top_indices = np.argsort(np.abs(contributions))[-5:][::-1]
-        expected_top = [3, 1, 8, 5, 2]  # -0.8, -0.5, 0.5, 0.4, 0.3
+        expected_top = [3, 8, 1, 5, 9]  # -0.8, 0.5, -0.5, 0.4, -0.3
         assert np.array_equal(top_indices, expected_top)
     
     def test_impact_direction_classification(self):

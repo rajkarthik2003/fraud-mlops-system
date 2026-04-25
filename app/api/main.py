@@ -7,7 +7,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Request, status, Depends, Header
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, ConfigDict
 from typing import List, Optional, Dict, Any
 from enum import Enum
 from dataclasses import dataclass
@@ -19,16 +19,17 @@ import shap
 # Structured Logging Setup
 # =========================
 logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s"
+    level=logging.INFO, format="%(asctime)s | %(levelname)s | %(name)s | %(message)s"
 )
 logger = logging.getLogger("fraud_detection_api")
+
 
 # =========================
 # Prometheus Metrics
 # =========================
 class MetricsCollector:
     """Simple in-memory metrics collector"""
+
     def __init__(self):
         self.request_count = 0
         self.predictions_total = 0
@@ -36,69 +37,79 @@ class MetricsCollector:
         self.errors_total = 0
         self.request_latencies: List[float] = []
         self.start_time = time.time()
-    
+
     def increment_requests(self):
         self.request_count += 1
-    
+
     def increment_predictions(self, is_fraud: bool):
         self.predictions_total += 1
         if is_fraud:
             self.predictions_fraud += 1
-    
+
     def increment_errors(self):
         self.errors_total += 1
-    
+
     def record_latency(self, latency: float):
         self.request_latencies.append(latency)
         # Keep only last 1000 latencies
         if len(self.request_latencies) > 1000:
             self.request_latencies = self.request_latencies[-1000:]
-    
+
     def get_metrics(self) -> Dict[str, Any]:
         uptime = time.time() - self.start_time
-        avg_latency = sum(self.request_latencies) / len(self.request_latencies) if self.request_latencies else 0
-        
+        avg_latency = (
+            sum(self.request_latencies) / len(self.request_latencies)
+            if self.request_latencies
+            else 0
+        )
+
         return {
             "uptime_seconds": round(uptime, 2),
             "requests_total": self.request_count,
             "predictions_total": self.predictions_total,
             "predictions_fraud": self.predictions_fraud,
-            "fraud_rate": round(self.predictions_fraud / max(self.predictions_total, 1), 4),
+            "fraud_rate": round(
+                self.predictions_fraud / max(self.predictions_total, 1), 4
+            ),
             "errors_total": self.errors_total,
             "avg_latency_ms": round(avg_latency * 1000, 2),
-            "requests_per_second": round(self.request_count / max(uptime, 1), 2)
+            "requests_per_second": round(self.request_count / max(uptime, 1), 2),
         }
 
+
 metrics = MetricsCollector()
+
 
 # =========================
 # Rate Limiting
 # =========================
 class RateLimiter:
     """Simple in-memory rate limiter"""
+
     def __init__(self, max_requests: int = 100, window_seconds: int = 60):
         self.max_requests = max_requests
         self.window_seconds = window_seconds
         self.requests: Dict[str, List[float]] = {}
-    
+
     def is_allowed(self, client_id: str) -> bool:
         now = time.time()
         if client_id not in self.requests:
             self.requests[client_id] = []
-        
+
         # Clean old requests
         self.requests[client_id] = [
-            t for t in self.requests[client_id]
-            if now - t < self.window_seconds
+            t for t in self.requests[client_id] if now - t < self.window_seconds
         ]
-        
+
         if len(self.requests[client_id]) >= self.max_requests:
             return False
-        
+
         self.requests[client_id].append(now)
         return True
 
+
 rate_limiter = RateLimiter(max_requests=100, window_seconds=60)
+
 
 # =========================
 # Error Codes
@@ -109,26 +120,27 @@ class ErrorCode(str, Enum):
     FEATURE_COUNT_MISMATCH = "E1002"
     INVALID_FEATURE_VALUE = "E1003"
     BATCH_TOO_LARGE = "E1004"
-    
+
     # Model errors (2xxx)
     MODEL_NOT_LOADED = "E2001"
     MODEL_PREDICTION_FAILED = "E2002"
     EXPLAINER_FAILED = "E2003"
-    
+
     # Drift errors (3xxx)
     DRIFT_STATS_UNAVAILABLE = "E3001"
     DRIFT_CHECK_FAILED = "E3002"
-    
+
     # Auth errors (4xxx)
     INVALID_API_KEY = "E4001"
     API_KEY_MISSING = "E4002"
-    
+
     # Rate limiting (5xxx)
     RATE_LIMIT_EXCEEDED = "E5001"
-    
+
     # Internal errors (9xxx)
     INTERNAL_ERROR = "E9001"
     SERVICE_UNAVAILABLE = "E9002"
+
 
 ERROR_MESSAGES = {
     ErrorCode.INVALID_FEATURES: "Invalid features provided",
@@ -152,12 +164,14 @@ ERROR_MESSAGES = {
 # =========================
 API_KEY = os.environ.get("API_KEY", "dev-key-change-in-production")
 
+
 class APIKeyHeader(BaseModel):
     """Dependency for API key validation"""
+
     api_key: str = Header(..., alias="X-API-Key")
-    
-    class Config:
-        extra = "allow"
+
+    model_config = ConfigDict(extra="allow")
+
 
 def verify_api_key(api_key: str = Depends(APIKeyHeader)):
     """Verify the API key"""
@@ -165,49 +179,13 @@ def verify_api_key(api_key: str = Depends(APIKeyHeader)):
         logger.warning(f"Invalid API key attempt")
         raise HTTPException(
             status_code=401,
-            detail={"error_code": ErrorCode.INVALID_API_KEY, "message": ERROR_MESSAGES[ErrorCode.INVALID_API_KEY]}
+            detail={
+                "error_code": ErrorCode.INVALID_API_KEY,
+                "message": ERROR_MESSAGES[ErrorCode.INVALID_API_KEY],
+            },
         )
     return api_key
 
-# =========================
-# Request ID Middleware
-# =========================
-@app.middleware("http")
-async def add_request_id(request: Request, call_next):
-    request_id = str(uuid.uuid4())
-    request.state.request_id = request_id
-    
-    logger.info(f"Request started | {request_id} | {request.method} {request.url.path}")
-    
-    response = await call_next(request)
-    
-    logger.info(f"Request completed | {request_id} | Status: {response.status_code}")
-    return response
-
-# =========================
-# Exception Handlers
-# =========================
-class FraudDetectionException(Exception):
-    def __init__(self, message: str, status_code: int = 500):
-        self.message = message
-        self.status_code = status_code
-        super().__init__(self.message)
-
-@app.exception_handler(FraudDetectionException)
-async def fraud_exception_handler(request: Request, exc: FraudDetectionException):
-    logger.error(f"Custom exception: {exc.message}")
-    return JSONResponse(
-        status_code=exc.status_code,
-        content={"error": exc.message, "request_id": request.state.request_id}
-    )
-
-@app.exception_handler(Exception)
-async def general_exception_handler(request: Request, exc: Exception):
-    logger.exception(f"Unhandled exception: {str(exc)}")
-    return JSONResponse(
-        status_code=500,
-        content={"error": "Internal server error", "request_id": request.state.request_id}
-    )
 
 # =========================
 # Lifespan (Startup/Shutdown)
@@ -220,12 +198,61 @@ async def lifespan(app: FastAPI):
     # Shutdown
     logger.info("Shutting down Fraud Detection API...")
 
+
 app = FastAPI(
     title="Fraud Detection API",
     version="2.0.0",
     description="Production-grade fraud detection with monitoring",
-    lifespan=lifespan
+    lifespan=lifespan,
 )
+
+
+# =========================
+# Request ID Middleware
+# =========================
+@app.middleware("http")
+async def add_request_id(request: Request, call_next):
+    request_id = str(uuid.uuid4())
+    request.state.request_id = request_id
+
+    logger.info(f"Request started | {request_id} | {request.method} {request.url.path}")
+
+    response = await call_next(request)
+
+    logger.info(f"Request completed | {request_id} | Status: {response.status_code}")
+    return response
+
+
+# =========================
+# Exception Handlers
+# =========================
+class FraudDetectionException(Exception):
+    def __init__(self, message: str, status_code: int = 500):
+        self.message = message
+        self.status_code = status_code
+        super().__init__(self.message)
+
+
+@app.exception_handler(FraudDetectionException)
+async def fraud_exception_handler(request: Request, exc: FraudDetectionException):
+    logger.error(f"Custom exception: {exc.message}")
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"error": exc.message, "request_id": request.state.request_id},
+    )
+
+
+@app.exception_handler(Exception)
+async def general_exception_handler(request: Request, exc: Exception):
+    logger.exception(f"Unhandled exception: {str(exc)}")
+    return JSONResponse(
+        status_code=500,
+        content={
+            "error": "Internal server error",
+            "request_id": request.state.request_id,
+        },
+    )
+
 
 # =========================
 # CORS Middleware
@@ -278,11 +305,37 @@ except Exception as e:
 # Feature names (Credit Card Dataset)
 FEATURE_NAMES = [
     "Time",
-    "V1","V2","V3","V4","V5","V6","V7","V8","V9","V10",
-    "V11","V12","V13","V14","V15","V16","V17","V18","V19","V20",
-    "V21","V22","V23","V24","V25","V26","V27","V28",
-    "Amount"
+    "V1",
+    "V2",
+    "V3",
+    "V4",
+    "V5",
+    "V6",
+    "V7",
+    "V8",
+    "V9",
+    "V10",
+    "V11",
+    "V12",
+    "V13",
+    "V14",
+    "V15",
+    "V16",
+    "V17",
+    "V18",
+    "V19",
+    "V20",
+    "V21",
+    "V22",
+    "V23",
+    "V24",
+    "V25",
+    "V26",
+    "V27",
+    "V28",
+    "Amount",
 ]
+
 
 # =========================
 # Enhanced Request Models
@@ -292,26 +345,50 @@ class Transaction(BaseModel):
         ...,
         min_length=30,
         max_length=30,
-        description="Exactly 30 transaction features (V1-V28, Time, Amount)"
+        description="Exactly 30 transaction features (V1-V28, Time, Amount)",
     )
-    
+
     model_config = {
         "json_schema_extra": {
             "examples": [
                 {
                     "features": [
-                        -0.435, 0.848, -0.432, 0.521, -0.246,
-                        -0.082, 0.395, -0.191, -0.556, 0.264,
-                        -0.344, -0.412, 0.512, -0.045, 0.876,
-                        -0.333, 0.621, -0.478, 0.112, -0.298,
-                        -0.566, 0.156, -0.689, 0.442, -0.215,
-                        0.134, -0.389, 0.287, 0.123, 150.00
+                        -0.435,
+                        0.848,
+                        -0.432,
+                        0.521,
+                        -0.246,
+                        -0.082,
+                        0.395,
+                        -0.191,
+                        -0.556,
+                        0.264,
+                        -0.344,
+                        -0.412,
+                        0.512,
+                        -0.045,
+                        0.876,
+                        -0.333,
+                        0.621,
+                        -0.478,
+                        0.112,
+                        -0.298,
+                        -0.566,
+                        0.156,
+                        -0.689,
+                        0.442,
+                        -0.215,
+                        0.134,
+                        -0.389,
+                        0.287,
+                        0.123,
+                        150.00,
                     ]
                 }
             ]
         }
     }
-    
+
     @field_validator("features")
     @classmethod
     def validate_features(cls, v):
@@ -322,23 +399,86 @@ class Transaction(BaseModel):
                 raise ValueError(f"Feature {i} must be a valid number")
         return v
 
+
 class BatchTransaction(BaseModel):
     transactions: List[List[float]]
     max_batch_size: int = Field(default=1000, le=1000)
-    
+
     model_config = {
         "json_schema_extra": {
             "examples": [
                 {
                     "transactions": [
-                        [-0.435, 0.848, -0.432, 0.521, -0.246, -0.082, 0.395, -0.191, -0.556, 0.264, -0.344, -0.412, 0.512, -0.045, 0.876, -0.333, 0.621, -0.478, 0.112, -0.298, -0.566, 0.156, -0.689, 0.442, -0.215, 0.134, -0.389, 0.287, 0.123, 150.00],
-                        [0.123, -0.456, 0.789, -0.321, 0.654, -0.987, 0.111, -0.222, 0.333, -0.444, 0.555, -0.666, 0.777, -0.888, 0.999, -0.111, 0.222, -0.333, 0.444, -0.555, 0.666, -0.777, 0.888, -0.999, 0.101, -0.202, 0.303, -0.404, 0.505, 250.00]
+                        [
+                            -0.435,
+                            0.848,
+                            -0.432,
+                            0.521,
+                            -0.246,
+                            -0.082,
+                            0.395,
+                            -0.191,
+                            -0.556,
+                            0.264,
+                            -0.344,
+                            -0.412,
+                            0.512,
+                            -0.045,
+                            0.876,
+                            -0.333,
+                            0.621,
+                            -0.478,
+                            0.112,
+                            -0.298,
+                            -0.566,
+                            0.156,
+                            -0.689,
+                            0.442,
+                            -0.215,
+                            0.134,
+                            -0.389,
+                            0.287,
+                            0.123,
+                            150.00,
+                        ],
+                        [
+                            0.123,
+                            -0.456,
+                            0.789,
+                            -0.321,
+                            0.654,
+                            -0.987,
+                            0.111,
+                            -0.222,
+                            0.333,
+                            -0.444,
+                            0.555,
+                            -0.666,
+                            0.777,
+                            -0.888,
+                            0.999,
+                            -0.111,
+                            0.222,
+                            -0.333,
+                            0.444,
+                            -0.555,
+                            0.666,
+                            -0.777,
+                            0.888,
+                            -0.999,
+                            0.101,
+                            -0.202,
+                            0.303,
+                            -0.404,
+                            0.505,
+                            250.00,
+                        ],
                     ]
                 }
             ]
         }
     }
-    
+
     @field_validator("transactions")
     @classmethod
     def validate_batch(cls, v):
@@ -351,17 +491,15 @@ class BatchTransaction(BaseModel):
                 raise ValueError(f"Transaction {i} must have exactly 30 features")
         return v
 
+
 # =========================
 # Health Check Endpoints
 # =========================
 @app.get("/health")
 def health_check():
     """Liveness probe - is the service running?"""
-    return {
-        "status": "healthy",
-        "service": "fraud-detection-api",
-        "version": "2.0.0"
-    }
+    return {"status": "healthy", "service": "fraud-detection-api", "version": "2.0.0"}
+
 
 @app.get("/ready")
 def readiness_check():
@@ -370,28 +508,31 @@ def readiness_check():
         "model_loaded": model is not None,
         "explainer_initialized": explainer is not None,
         "threshold_loaded": BEST_THRESHOLD > 0,
-        "drift_stats_loaded": feature_means is not None
+        "drift_stats_loaded": feature_means is not None,
     }
-    
+
     all_ready = all(checks.values())
-    
-    return {
-        "status": "ready" if all_ready else "not_ready",
-        "checks": checks
-    }
+
+    return {"status": "ready" if all_ready else "not_ready", "checks": checks}
+
 
 # =========================
 # Routes
 # =========================
 @app.get("/")
 def root():
-    return {"status": "ok", "message": "Fraud Detection API running", "version": "2.0.0"}
+    return {
+        "status": "ok",
+        "message": "Fraud Detection API running",
+        "version": "2.0.0",
+    }
+
 
 @app.get("/metrics")
 def get_metrics():
     """Returns both model performance metrics and operational metrics"""
     operational = metrics.get_metrics()
-    
+
     return {
         "model": {
             "name": "XGBoost",
@@ -401,15 +542,16 @@ def get_metrics():
             "best_threshold": BEST_THRESHOLD,
             "best_f1": 0.8804,
             "precision": 0.9419,
-            "recall": 0.8265
+            "recall": 0.8265,
         },
-        "operational": operational
+        "operational": operational,
     }
+
 
 @app.post("/predict")
 def predict(tx: Transaction, request: Request):
     start_time = time.time()
-    
+
     # Rate limiting check
     client_id = request.client.host if request.client else "unknown"
     if not rate_limiter.is_allowed(client_id):
@@ -418,27 +560,29 @@ def predict(tx: Transaction, request: Request):
             status_code=429,
             detail={
                 "error_code": ErrorCode.RATE_LIMIT_EXCEEDED,
-                "message": ERROR_MESSAGES[ErrorCode.RATE_LIMIT_EXCEEDED]
-            }
+                "message": ERROR_MESSAGES[ErrorCode.RATE_LIMIT_EXCEEDED],
+            },
         )
-    
+
     try:
         x = np.array(tx.features, dtype=float).reshape(1, -1)
         prob = float(model.predict_proba(x)[0, 1])
         pred = int(prob >= BEST_THRESHOLD)
-        
+
         # Record metrics
         metrics.increment_requests()
         metrics.increment_predictions(bool(pred))
         metrics.record_latency(time.time() - start_time)
 
-        logger.info(f"Prediction: prob={prob:.4f}, pred={pred}, request_id={request.state.request_id}")
+        logger.info(
+            f"Prediction: prob={prob:.4f}, pred={pred}, request_id={request.state.request_id}"
+        )
 
         return {
             "fraud_probability": round(prob, 6),
             "threshold": BEST_THRESHOLD,
             "prediction": pred,
-            "request_id": request.state.request_id
+            "request_id": request.state.request_id,
         }
     except Exception as e:
         metrics.increment_errors()
@@ -447,9 +591,10 @@ def predict(tx: Transaction, request: Request):
             status_code=500,
             detail={
                 "error_code": ErrorCode.MODEL_PREDICTION_FAILED,
-                "message": ERROR_MESSAGES[ErrorCode.MODEL_PREDICTION_FAILED]
-            }
+                "message": ERROR_MESSAGES[ErrorCode.MODEL_PREDICTION_FAILED],
+            },
         )
+
 
 @app.post("/predict_batch")
 def predict_batch(data: BatchTransaction, request: Request):
@@ -458,17 +603,20 @@ def predict_batch(data: BatchTransaction, request: Request):
         probs = model.predict_proba(x)[:, 1]
         preds = (probs >= BEST_THRESHOLD).astype(int)
 
-        logger.info(f"Batch prediction: {len(data.transactions)} transactions, request_id={request.state.request_id}")
+        logger.info(
+            f"Batch prediction: {len(data.transactions)} transactions, request_id={request.state.request_id}"
+        )
 
         return {
             "predictions": preds.tolist(),
             "probabilities": probs.tolist(),
             "count": len(preds),
-            "request_id": request.state.request_id
+            "request_id": request.state.request_id,
         }
     except Exception as e:
         logger.error(f"Batch prediction error: {e}")
         raise HTTPException(status_code=500, detail="Batch prediction failed")
+
 
 @app.post("/explain")
 def explain_transaction(tx: Transaction, request: Request):
@@ -484,12 +632,18 @@ def explain_transaction(tx: Transaction, request: Request):
 
         explanation = []
         for idx in top_indices:
-            explanation.append({
-                "feature_name": FEATURE_NAMES[idx],
-                "feature_index": int(idx),
-                "impact": round(float(contributions[idx]), 6),
-                "direction": "increases_fraud" if contributions[idx] > 0 else "decreases_fraud"
-            })
+            explanation.append(
+                {
+                    "feature_name": FEATURE_NAMES[idx],
+                    "feature_index": int(idx),
+                    "impact": round(float(contributions[idx]), 6),
+                    "direction": (
+                        "increases_fraud"
+                        if contributions[idx] > 0
+                        else "decreases_fraud"
+                    ),
+                }
+            )
 
         logger.info(f"Explanation generated, request_id={request.state.request_id}")
 
@@ -497,18 +651,18 @@ def explain_transaction(tx: Transaction, request: Request):
             "fraud_probability": round(fraud_prob, 6),
             "prediction": int(fraud_prob >= BEST_THRESHOLD),
             "top_contributing_features": explanation,
-            "request_id": request.state.request_id
+            "request_id": request.state.request_id,
         }
     except Exception as e:
         logger.error(f"Explanation error: {e}")
         raise HTTPException(status_code=500, detail="Explanation failed")
 
+
 @app.post("/drift_check")
 def drift_check(tx: Transaction, request: Request):
     if feature_means is None or feature_stds is None:
         raise HTTPException(
-            status_code=503,
-            detail="Drift statistics not available. Train model first."
+            status_code=503, detail="Drift statistics not available. Train model first."
         )
 
     try:
@@ -519,26 +673,31 @@ def drift_check(tx: Transaction, request: Request):
         drift_results = []
         for i, z in enumerate(z_scores):
             if z > 3:
-                drift_results.append({
-                    "feature": FEATURE_NAMES[i],
-                    "index": i,
-                    "z_score": round(float(z), 4),
-                    "severity": "critical" if z > 5 else "warning"
-                })
+                drift_results.append(
+                    {
+                        "feature": FEATURE_NAMES[i],
+                        "index": i,
+                        "z_score": round(float(z), 4),
+                        "severity": "critical" if z > 5 else "warning",
+                    }
+                )
 
         has_drift = len(drift_results) > 0
-        
-        logger.info(f"Drift check: {'detected' if has_drift else 'none'}, request_id={request.state.request_id}")
+
+        logger.info(
+            f"Drift check: {'detected' if has_drift else 'none'}, request_id={request.state.request_id}"
+        )
 
         return {
             "drift_detected": has_drift,
             "drift_features": drift_results,
             "total_features_checked": len(FEATURE_NAMES),
-            "request_id": request.state.request_id
+            "request_id": request.state.request_id,
         }
     except Exception as e:
         logger.error(f"Drift check error: {e}")
         raise HTTPException(status_code=500, detail="Drift check failed")
+
 
 # =========================
 # Async Batch Processing
@@ -549,75 +708,76 @@ class AsyncBatchStatus(str, Enum):
     COMPLETED = "completed"
     FAILED = "failed"
 
+
 # In-memory job store (use Redis in production)
 batch_jobs: dict = {}
 
+
 @app.post("/predict_async", status_code=202)
 async def predict_async(
-    data: BatchTransaction,
-    request: Request,
-    api_key: str = Depends(verify_api_key)
+    data: BatchTransaction, request: Request, api_key: str = Depends(verify_api_key)
 ):
     """Submit batch prediction job for async processing"""
     import asyncio
-    
+
     job_id = str(uuid.uuid4())
-    
+
     batch_jobs[job_id] = {
         "status": AsyncBatchStatus.PENDING,
         "total": len(data.transactions),
         "processed": 0,
         "results": None,
-        "error": None
+        "error": None,
     }
-    
-    logger.info(f"Async job {job_id} submitted with {len(data.transactions)} transactions")
-    
+
+    logger.info(
+        f"Async job {job_id} submitted with {len(data.transactions)} transactions"
+    )
+
     # Process in background (use Celery/Redis in production)
     async def process_batch():
         try:
             batch_jobs[job_id]["status"] = AsyncBatchStatus.PROCESSING
-            
+
             # Simulate processing with chunking
             x = np.array(data.transactions, dtype=float)
             probs = model.predict_proba(x)[:, 1]
             preds = (probs >= BEST_THRESHOLD).astype(int)
-            
+
             batch_jobs[job_id]["results"] = {
                 "predictions": preds.tolist(),
-                "probabilities": probs.tolist()
+                "probabilities": probs.tolist(),
             }
             batch_jobs[job_id]["processed"] = len(preds)
             batch_jobs[job_id]["status"] = AsyncBatchStatus.COMPLETED
-            
+
             logger.info(f"Async job {job_id} completed")
         except Exception as e:
             batch_jobs[job_id]["status"] = AsyncBatchStatus.FAILED
             batch_jobs[job_id]["error"] = str(e)
             logger.error(f"Async job {job_id} failed: {e}")
-    
+
     # Run async (in production, dispatch to Celery task queue)
     asyncio.create_task(process_batch())
-    
+
     return {
         "job_id": job_id,
         "status": AsyncBatchStatus.PENDING,
         "message": "Job submitted. Use /predict_async/{job_id} to check status.",
-        "request_id": request.state.request_id
+        "request_id": request.state.request_id,
     }
+
 
 @app.get("/predict_async/{job_id}")
 async def get_async_result(
-    job_id: str,
-    request: Request,
-    api_key: str = Depends(verify_api_key)
+    job_id: str, request: Request, api_key: str = Depends(verify_api_key)
 ):
     """Get async batch job status and results"""
     if job_id not in batch_jobs:
         raise HTTPException(status_code=404, detail="Job not found")
-    
+
     job = batch_jobs[job_id]
-    
+
     return {
         "job_id": job_id,
         "status": job["status"],
@@ -625,5 +785,5 @@ async def get_async_result(
         "processed": job["processed"],
         "results": job.get("results"),
         "error": job.get("error"),
-        "request_id": request.state.request_id
+        "request_id": request.state.request_id,
     }

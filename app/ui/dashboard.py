@@ -21,10 +21,7 @@ for i in range(30):
 
 if st.button("Predict & Explain"):
 
-    response = requests.post(
-        f"{API_URL}/explain",
-        json={"features": features}
-    )
+    response = requests.post(f"{API_URL}/explain", json={"features": features})
 
     result = response.json()
 
