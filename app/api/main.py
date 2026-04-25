@@ -671,7 +671,7 @@ def root():
     return {
         "status": "ok",
         "message": "Fraud Detection API running",
-        "version": "2.0.0",
+        "version": "2.1.0",
     }
 
 
