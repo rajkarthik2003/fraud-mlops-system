@@ -19,17 +19,36 @@ spec:
           image: fraud-mlops:latest
           ports:
             - containerPort: 8000
+              name: http
           env:
             - name: API_KEY
               valueFrom:
                 secretKeyRef:
                   name: fraud-api-secret
                   key: API_KEY
+            - name: REDIS_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: fraud-config
+                  key: REDIS_URL
+            - name: CACHE_TTL
+              value: "3600"
+            - name: ENABLE_CACHE
+              value: "true"
+            - name: RATE_LIMIT_REQUESTS
+              value: "1000"
+            - name: RATE_LIMIT_WINDOW
+              value: "60"
             - name: MLFLOW_TRACKING_URI
               valueFrom:
                 configMapKeyRef:
                   name: fraud-config
                   key: MLFLOW_TRACKING_URI
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: fraud-db-secret
+                  key: DATABASE_URL
             - name: CORS_ORIGINS
               valueFrom:
                 configMapKeyRef:
@@ -48,6 +67,35 @@ spec:
               memory: "1Gi"
               cpu: "500m"
           livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          volumeMounts:
+            - name: model-storage
+              mountPath: /app/models
+              readOnly: true
+            - name: data-storage
+              mountPath: /app/data
+              readOnly: true
+      volumes:
+        - name: model-storage
+          persistentVolumeClaim:
+            claimName: fraud-models-pvc
+        - name: data-storage
+          persistentVolumeClaim:
+            claimName: fraud-data-pvc
             httpGet:
               path: /health
               port: 8000

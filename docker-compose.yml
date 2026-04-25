@@ -1,6 +1,21 @@
 version: "3.9"
 
 services:
+  # Redis for caching
+  redis:
+    image: redis:7-alpine
+    container_name: fraud_redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+
   # MLflow Tracking Server
   mlflow:
     image: ghcr.io/mlflow/mlflow:latest
@@ -13,9 +28,9 @@ services:
       - MLFLOW_BACKEND_STORE=sqlite:///mlflow.db
       - MLFLOW_ARTIFACT_ROOT=/mlflow/artifacts
     command: >
-      mlflow server 
-      --backend-store-uri sqlite:///mlflow.db 
-      --default-artifact-root /mlflow/artifacts 
+      mlflow server
+      --backend-store-uri sqlite:///mlflow.db
+      --default-artifact-root /mlflow/artifacts
       --host 0.0.0.0
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
@@ -30,12 +45,21 @@ services:
     ports:
       - "8000:8000"
     volumes:
-      - ./models:/app/models
+      - ./models:/app/models:ro
+      - ./data:/app/data:ro
     environment:
       - API_KEY=${API_KEY:-dev-key-change-in-production}
+      - REDIS_URL=redis://redis:6379
+      - CACHE_TTL=3600
+      - ENABLE_CACHE=true
+      - RATE_LIMIT_REQUESTS=1000
+      - RATE_LIMIT_WINDOW=60
       - MLFLOW_TRACKING_URI=http://mlflow:5000
       - DATABASE_URL=postgresql://fraud_user:fraud_pass@postgres:5432/fraud_db
+      - CORS_ORIGINS=http://localhost:8501,http://localhost:3000
     depends_on:
+      redis:
+        condition: service_healthy
       mlflow:
         condition: service_healthy
       postgres:
@@ -46,6 +70,7 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
+    restart: unless-stopped
 
   # Streamlit Dashboard
   ui:
@@ -53,12 +78,18 @@ services:
     container_name: fraud_ui
     ports:
       - "8501:8501"
-    depends_on:
-      - api
     environment:
       - API_URL=http://api:8000
       - API_KEY=${API_KEY:-dev-key-change-in-production}
+    depends_on:
+      - api
     command: streamlit run app/ui/dashboard.py --server.port=8501 --server.address=0.0.0.0
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8501/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
 
   # PostgreSQL for prediction logging
   postgres:
@@ -70,8 +101,16 @@ services:
       - POSTGRES_USER=fraud_user
       - POSTGRES_PASSWORD=fraud_pass
       - POSTGRES_DB=fraud_db
+      - POSTGRES_INITDB_ARGS=--encoding=UTF-8
     volumes:
       - postgres_data:/var/lib/postgresql/data
+      - ./monitoring/init_db.sql:/docker-entrypoint-initdb.d/init_db.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fraud_user -d fraud_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
 
   # Prometheus for metrics
   prometheus:
@@ -80,13 +119,21 @@ services:
     ports:
       - "9090:9090"
     volumes:
-      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prometheus_data:/prometheus
     command:
       - '--config.file=/etc/prometheus/prometheus.yml'
       - '--storage.tsdb.path=/prometheus'
+      - '--web.enable-lifecycle'
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:9090/-/healthy"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
 
 volumes:
+  redis_data:
   mlruns:
   postgres_data:
   prometheus_data:

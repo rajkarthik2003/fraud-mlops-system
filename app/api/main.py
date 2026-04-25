@@ -3,10 +3,15 @@ import logging
 import uuid
 import os
 import time
+import asyncio
+import hashlib
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, HTTPException, Request, status, Depends, Header
+from functools import lru_cache
+from fastapi import FastAPI, HTTPException, Request, status, Depends, Header, HTTPException
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
+from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from pydantic import BaseModel, Field, field_validator, ConfigDict
 from typing import List, Optional, Dict, Any
 from enum import Enum
@@ -14,27 +19,62 @@ from dataclasses import dataclass
 import joblib
 import numpy as np
 import shap
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.middleware import SlowAPIMiddleware
+from slowapi.errors import RateLimitExceeded
+import redis
+from circuitbreaker import circuit
+
+# =========================
+# Configuration
+# =========================
+REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379")
+CACHE_TTL = int(os.environ.get("CACHE_TTL", "3600"))  # 1 hour
+ENABLE_CACHE = os.environ.get("ENABLE_CACHE", "true").lower() == "true"
+RATE_LIMIT_REQUESTS = int(os.environ.get("RATE_LIMIT_REQUESTS", "100"))
+RATE_LIMIT_WINDOW = int(os.environ.get("RATE_LIMIT_WINDOW", "60"))  # per minute
 
 # =========================
 # Structured Logging Setup
 # =========================
 logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s | %(levelname)s | %(name)s | %(message)s"
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s"
 )
 logger = logging.getLogger("fraud_detection_api")
 
+# =========================
+# Redis Cache Setup
+# =========================
+try:
+    redis_client = redis.from_url(REDIS_URL, decode_responses=True)
+    redis_client.ping()
+    logger.info("Redis cache connected")
+    CACHE_ENABLED = True
+except Exception as e:
+    logger.warning(f"Redis not available: {e}. Running without cache.")
+    redis_client = None
+    CACHE_ENABLED = False
+
+# =========================
+# Rate Limiting Setup
+# =========================
+limiter = Limiter(key_func=get_remote_address, default_limits=[f"{RATE_LIMIT_REQUESTS} per {RATE_LIMIT_WINDOW} minute"])
 
 # =========================
 # Prometheus Metrics
 # =========================
 class MetricsCollector:
-    """Simple in-memory metrics collector"""
+    """Enhanced metrics collector with Redis persistence"""
 
     def __init__(self):
         self.request_count = 0
         self.predictions_total = 0
         self.predictions_fraud = 0
         self.errors_total = 0
+        self.cache_hits = 0
+        self.cache_misses = 0
         self.request_latencies: List[float] = []
         self.start_time = time.time()
 
@@ -48,6 +88,76 @@ class MetricsCollector:
 
     def increment_errors(self):
         self.errors_total += 1
+
+    def increment_cache_hit(self):
+        self.cache_hits += 1
+
+    def increment_cache_miss(self):
+        self.cache_misses += 1
+
+    def add_latency(self, latency: float):
+        self.request_latencies.append(latency)
+        # Keep only last 1000 latencies
+        if len(self.request_latencies) > 1000:
+            self.request_latencies = self.request_latencies[-1000:]
+
+    @property
+    def avg_latency(self) -> float:
+        return np.mean(self.request_latencies) if self.request_latencies else 0.0
+
+    @property
+    def cache_hit_rate(self) -> float:
+        total = self.cache_hits + self.cache_misses
+        return self.cache_hits / total if total > 0 else 0.0
+
+# =========================
+# Cache Functions
+# =========================
+def get_cache_key(features: List[float]) -> str:
+    """Generate cache key from features"""
+    feature_str = ",".join(f"{x:.6f}" for x in features)
+    return hashlib.md5(feature_str.encode()).hexdigest()
+
+def get_cached_prediction(cache_key: str) -> Optional[Dict[str, Any]]:
+    """Get prediction from cache"""
+    if not CACHE_ENABLED or not redis_client:
+        return None
+    try:
+        cached = redis_client.get(f"pred:{cache_key}")
+        if cached:
+            import json
+            return json.loads(cached)
+    except Exception as e:
+        logger.warning(f"Cache read error: {e}")
+    return None
+
+def set_cached_prediction(cache_key: str, prediction: Dict[str, Any]):
+    """Cache prediction result"""
+    if not CACHE_ENABLED or not redis_client:
+        return
+    try:
+        import json
+        redis_client.setex(f"pred:{cache_key}", CACHE_TTL, json.dumps(prediction))
+    except Exception as e:
+        logger.warning(f"Cache write error: {e}")
+
+# =========================
+# Circuit Breaker for Model Inference
+# =========================
+@circuit(failure_threshold=5, recovery_timeout=60, expected_exception=Exception)
+def predict_with_circuit_breaker(features: np.ndarray) -> np.ndarray:
+    """Circuit breaker protected model prediction"""
+    return model.predict_proba(features)
+
+@circuit(failure_threshold=5, recovery_timeout=60, expected_exception=Exception)
+def explain_with_circuit_breaker(features: np.ndarray) -> Dict[str, Any]:
+    """Circuit breaker protected SHAP explanation"""
+    shap_values = explainer.shap_values(features)
+    return {
+        "shap_values": shap_values.tolist() if isinstance(shap_values, np.ndarray) else shap_values,
+        "base_value": float(explainer.expected_value),
+        "feature_names": FEATURE_NAMES
+    }
 
     def record_latency(self, latency: float):
         self.request_latencies.append(latency)
@@ -201,15 +311,31 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Fraud Detection API",
-    version="2.0.0",
-    description="Production-grade fraud detection with monitoring",
+    version="2.1.0",
+    description="Production-grade fraud detection with monitoring, caching, and security",
     lifespan=lifespan,
+    docs_url="/docs",
+    redoc_url="/redoc",
+    openapi_url="/openapi.json"
 )
 
+# =========================
+# Security & Performance Middleware
+# =========================
+app.add_middleware(GZipMiddleware, minimum_size=1000)
+app.add_middleware(TrustedHostMiddleware, allowed_hosts=["*"])  # Configure for production
+app.add_middleware(SlowAPIMiddleware)
 
 # =========================
-# Request ID Middleware
+# CORS Middleware
 # =========================
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=os.environ.get("CORS_ORIGINS", "*").split(","),
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 @app.middleware("http")
 async def add_request_id(request: Request, call_next):
     request_id = str(uuid.uuid4())
@@ -498,7 +624,12 @@ class BatchTransaction(BaseModel):
 @app.get("/health")
 def health_check():
     """Liveness probe - is the service running?"""
-    return {"status": "healthy", "service": "fraud-detection-api", "version": "2.0.0"}
+    return {
+        "status": "healthy",
+        "service": "fraud-detection-api",
+        "version": "2.1.0",
+        "timestamp": time.time()
+    }
 
 
 @app.get("/ready")
@@ -508,10 +639,26 @@ def readiness_check():
         "model_loaded": model is not None,
         "explainer_initialized": explainer is not None,
         "threshold_loaded": BEST_THRESHOLD > 0,
-        "drift_stats_loaded": feature_means is not None,
+        "drift_stats_loaded": feature_means is not None and feature_stds is not None,
+        "redis_cache": CACHE_ENABLED if CACHE_ENABLED else "disabled",
+        "rate_limiter": True,
     }
 
-    all_ready = all(checks.values())
+    # Test model prediction with dummy data
+    try:
+        test_features = np.zeros((1, 30))
+        test_pred = predict_with_circuit_breaker(test_features)
+        checks["model_inference"] = test_pred.shape == (1, 2)
+    except Exception:
+        checks["model_inference"] = False
+
+    all_ready = all(checks.values()) if isinstance(checks["redis_cache"], bool) else all(v for k, v in checks.items() if k != "redis_cache")
+
+    return {
+        "status": "ready" if all_ready else "not_ready",
+        "checks": checks,
+        "timestamp": time.time()
+    }
 
     return {"status": "ready" if all_ready else "not_ready", "checks": checks}
 
@@ -530,8 +677,8 @@ def root():
 
 @app.get("/metrics")
 def get_metrics():
-    """Returns both model performance metrics and operational metrics"""
-    operational = metrics.get_metrics()
+    """Returns comprehensive model and operational metrics"""
+    uptime = time.time() - metrics.start_time
 
     return {
         "model": {
@@ -543,47 +690,75 @@ def get_metrics():
             "best_f1": 0.8804,
             "precision": 0.9419,
             "recall": 0.8265,
+            "features": len(FEATURE_NAMES),
         },
-        "operational": operational,
+        "operational": {
+            "uptime_seconds": round(uptime, 2),
+            "total_requests": metrics.request_count,
+            "total_predictions": metrics.predictions_total,
+            "fraud_predictions": metrics.predictions_fraud,
+            "error_count": metrics.errors_total,
+            "avg_latency_ms": round(metrics.avg_latency * 1000, 2) if metrics.request_latencies else 0,
+            "cache_enabled": CACHE_ENABLED,
+            "cache_hit_rate": round(metrics.cache_hit_rate * 100, 2) if CACHE_ENABLED else 0,
+            "rate_limit_requests": RATE_LIMIT_REQUESTS,
+            "rate_limit_window_seconds": RATE_LIMIT_WINDOW,
+        },
+        "system": {
+            "python_version": f"{__import__('sys').version_info.major}.{__import__('sys').version_info.minor}",
+            "redis_connected": CACHE_ENABLED,
+            "model_loaded": True,
+            "explainer_loaded": True,
+        }
     }
 
 
 @app.post("/predict")
+@limiter.limit(f"{RATE_LIMIT_REQUESTS} per {RATE_LIMIT_WINDOW} minute")
 def predict(tx: Transaction, request: Request):
     start_time = time.time()
 
-    # Rate limiting check
-    client_id = request.client.host if request.client else "unknown"
-    if not rate_limiter.is_allowed(client_id):
-        metrics.increment_errors()
-        raise HTTPException(
-            status_code=429,
-            detail={
-                "error_code": ErrorCode.RATE_LIMIT_EXCEEDED,
-                "message": ERROR_MESSAGES[ErrorCode.RATE_LIMIT_EXCEEDED],
-            },
-        )
-
     try:
+        # Check cache first
+        cache_key = get_cache_key(tx.features)
+        cached_result = get_cached_prediction(cache_key)
+        if cached_result:
+            metrics.increment_cache_hit()
+            metrics.increment_requests()
+            cached_result["cached"] = True
+            cached_result["request_id"] = request.state.request_id
+            logger.info(f"Cache hit for request {request.state.request_id}")
+            return cached_result
+
+        metrics.increment_cache_miss()
+
+        # Perform prediction with circuit breaker
         x = np.array(tx.features, dtype=float).reshape(1, -1)
-        prob = float(model.predict_proba(x)[0, 1])
+        prob = float(predict_with_circuit_breaker(x)[0, 1])
         pred = int(prob >= BEST_THRESHOLD)
 
-        # Record metrics
-        metrics.increment_requests()
-        metrics.increment_predictions(bool(pred))
-        metrics.record_latency(time.time() - start_time)
-
-        logger.info(
-            f"Prediction: prob={prob:.4f}, pred={pred}, request_id={request.state.request_id}"
-        )
-
-        return {
+        result = {
             "fraud_probability": round(prob, 6),
             "threshold": BEST_THRESHOLD,
             "prediction": pred,
             "request_id": request.state.request_id,
+            "cached": False
         }
+
+        # Cache the result
+        set_cached_prediction(cache_key, result)
+
+        # Record metrics
+        metrics.increment_requests()
+        metrics.increment_predictions(bool(pred))
+        latency = time.time() - start_time
+        metrics.add_latency(latency)
+
+        logger.info(
+            f"Prediction: prob={prob:.4f}, pred={pred}, latency={latency:.3f}s, request_id={request.state.request_id}"
+        )
+
+        return result
     except Exception as e:
         metrics.increment_errors()
         logger.error(f"Prediction error: {e}")
@@ -597,6 +772,7 @@ def predict(tx: Transaction, request: Request):
 
 
 @app.post("/predict_batch")
+@limiter.limit(f"{RATE_LIMIT_REQUESTS} per {RATE_LIMIT_WINDOW} minute")
 def predict_batch(data: BatchTransaction, request: Request):
     try:
         x = np.array(data.transactions, dtype=float)

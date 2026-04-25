@@ -1,5 +1,5 @@
 fastapi
-uvicorn
+uvicorn[standard]
 pandas
 numpy
 scikit-learn
@@ -8,6 +8,9 @@ mlflow
 shap
 joblib
 streamlit
+redis
+slowapi
+circuitbreaker
 # Testing
 pytest
 pytest-cov
@@ -15,3 +18,5 @@ httpx
 # Linting
 flake8
 black
+# Optional: For production monitoring
+prometheus-client
