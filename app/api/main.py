@@ -323,8 +323,8 @@ app = FastAPI(
 # Security & Performance Middleware
 # =========================
 app.add_middleware(GZipMiddleware, minimum_size=1000)
-app.add_middleware(TrustedHostMiddleware, allowed_hosts=["*"])  # Configure for production
-app.add_middleware(SlowAPIMiddleware)
+# app.add_middleware(TrustedHostMiddleware, allowed_hosts=["*"])  # Configure for production
+# app.add_middleware(SlowAPIMiddleware, limiter=limiter)
 
 # =========================
 # CORS Middleware
@@ -714,7 +714,7 @@ def get_metrics():
 
 
 @app.post("/predict")
-@limiter.limit(f"{RATE_LIMIT_REQUESTS} per {RATE_LIMIT_WINDOW} minute")
+# @limiter.limit(f"{RATE_LIMIT_REQUESTS} per {RATE_LIMIT_WINDOW} minute")
 def predict(tx: Transaction, request: Request):
     start_time = time.time()
 
@@ -772,7 +772,7 @@ def predict(tx: Transaction, request: Request):
 
 
 @app.post("/predict_batch")
-@limiter.limit(f"{RATE_LIMIT_REQUESTS} per {RATE_LIMIT_WINDOW} minute")
+# @limiter.limit(f"{RATE_LIMIT_REQUESTS} per {RATE_LIMIT_WINDOW} minute")
 def predict_batch(data: BatchTransaction, request: Request):
     try:
         x = np.array(data.transactions, dtype=float)
